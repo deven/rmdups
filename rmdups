@@ -1,0 +1,280 @@
+#!/usr/bin/perl
+
+use Getopt::Std;
+use Digest::MD5;
+
+sub scan (@);
+sub remove_duplicates (@);
+sub remove_empties (@);
+sub dir_entries ($);
+sub size ($);
+sub md5 ($);
+sub identical ($$);
+
+# Program version.
+$VERSION = "0.1";
+
+# Hardcoded parameters.
+$block_size = 8192;
+
+# Setup usage and version messages.
+($program = $0) =~ s/^.*\///;
+$usage = "Usage: $program [-n] [-v] source ... -- target ...\n";
+$version = "$program version $VERSION\n";
+
+# Don't buffer output.
+$| = 1;
+
+# Use standard --help and --version switches.
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+
+# Custom --version message.
+sub VERSION_MESSAGE {
+   print $version;
+}
+
+# Custom --help message.
+sub HELP_MESSAGE {
+   print <<EOF;
+
+$usage
+Scans files in source list (recursively traversing directories), then walks the
+target list, removing any duplicate files found anywhere in the source list.
+
+As files are selected for removal, the pathname of the file to be deleted is
+output to stdout, unless -v is specified for more verbose output.  If -n is
+specified, a dry run will be performed, and no files will actually be removed.
+EOF
+}
+
+# Parse the command-line switches.
+our($opt_n, $opt_v);
+getopts("nv");
+
+# Remove trailing slashes from filenames.
+map {s/\/+$//;} @ARGV;
+
+# Determine the source files.
+while ($source = shift @ARGV) {
+   last if $source eq "--";
+   push @sources, $source;
+}
+
+# Abort unless both sources and targets were identified.
+die $usage unless @sources and @ARGV;
+
+# Scan the source file(s).
+scan @sources;
+
+# Remove duplicates among remaining files.
+remove_duplicates @ARGV;
+
+# Recursive subroutine to scan and remember source files.
+sub scan (@) {
+   my @files = @_;
+
+   foreach my $file (@files) {
+      if (-l $file) {
+         readlink $file or warn "$file: $!\n";
+      } elsif (-d _) {
+         scan dir_entries $file;
+      } elsif ($size = size $file) {
+         push @{$sources{$size}}, $file;
+      }
+   }
+}
+
+# Recursive subroutine to remove duplicates of source files.
+sub remove_duplicates (@) {
+   my @files = @_;
+
+   foreach my $file (@files) {
+      if (-l $file) {
+         readlink $file or warn "$file: $!\n";
+         # Should symlinks be removed if the relative path or basename matches?
+      } elsif (-d _) {
+         remove_duplicates dir_entries $file;
+      } elsif ($size = size $file) {
+         my @sources = @{$sources{$size}};
+         if (@sources) {
+            my $md5 = md5 $file;
+            foreach $source (@sources) {
+               my $source_md5 = md5 $source;
+               if ($md5 eq $source_md5) {
+                  next unless identical $file, $source;
+                  if ($opt_n and $opt_v) {
+                     print "would remove \"$file\" as duplicate of \"$source\"...\n";
+                  } elsif ($opt_v) {
+                     print "removing \"$file\" as duplicate of \"$source\"...\n";
+                  } else {
+                     print "$file\n";
+                  }
+                  unlink $file or warn "$file: $!\n" unless $opt_n;
+               }
+            }
+         }
+      }
+
+      remove_empties $file;
+   }
+}
+
+# Remove empty files and directories.
+sub remove_empties (@) {
+   my @files = @_;
+
+   foreach my $file (@files) {
+      if (-l $file) {
+         my $target = readlink $file or warn "$file: $!\n";
+         unless (-e $file) {
+            if ($opt_v) {
+               print "removing broken link \"$file\" -> \"$target\"...\n";
+            } else {
+               print "$file\n";
+            }
+            unlink $file;
+         }
+      } elsif (-d _) {
+         my @entries = dir_entries $file;
+         my @empty;
+         my $only_empty = 1;
+         foreach my $entry (@entries) {
+            if (-l $entry or -d _) {
+               remove_empties $entry;
+               undef $only_empty if -e $entry;
+            } elsif (-f _ and -z _) {
+               push @empty, $entry;
+            } else {
+               undef $only_empty;
+            }
+         }
+         if ($only_empty) {
+            foreach my $empty (@empty) {
+               if ($opt_v) {
+                  print "removing empty file \"$empty\"...\n";
+               } else {
+                  print "$file\n";
+               }
+               unlink $empty or warn "$empty: $!\n";
+            }
+
+            if ($opt_v) {
+               print "removing empty directory \"$file\"...\n";
+            } else {
+               print "$file\n";
+            }
+            rmdir $file or warn "$file: $!\n";
+         }
+      } elsif (-z _) {
+         push @{$sources{$size}}, $file;
+         return 1;
+      }
+   }
+}
+
+# Subroutine to get the entries of a directory, sorted with subdirectories last.
+sub dir_entries ($) {
+   my $dir = shift;
+
+   my($handle, $entry, @subdir, @entries);
+   if (opendir $handle, $dir) {
+      print "scanning directory \"$dir\"...\n" if $opt_v;
+      while (defined($entry = readdir $handle)) {
+         unless ($entry =~ /^\.{1,2}$/) {
+            $entry = "$dir/$entry";
+            if (-l $entry or not -d _) {
+               push @entries, $entry;
+            } else {
+               push @subdir, $entry;
+            }
+         }
+      }
+      closedir $handle;
+
+      @entries = sort @entries;
+      @subdir = sort @subdir;
+
+      return @entries, @subdir;
+   } else {
+      warn "$dir: $!\n";
+   }
+}
+
+# Get the size of the specified file.
+sub size ($) {
+   my $file = shift;
+
+   my $size = (lstat $file)[7];
+   return $size if -f _;
+}
+
+# Get the MD5 checksum of the first block of the specified file.
+sub md5 ($) {
+   my $file = shift;
+
+   return $md5{$file} if $md5{$file};
+
+   if (not -l $file and -f _) {
+      my $handle;
+      if (open $handle, "<$file\0") {
+         binmode $handle;
+         my $data;
+         $bytes = sysread $handle, $data, $block_size;
+         if (not defined $bytes) {
+            warn "$file: $!\n";
+            return;
+         }
+         close $handle;
+         $md5{$file} = Digest::MD5::md5($data);
+         return $md5{$file};
+      } else {
+         warn "$file: $!\n";
+      }
+   }
+}
+
+# Verify whether two files are byte-for-byte identical.
+sub identical ($$) {
+   my($file1, $file2) = @_;
+
+   if (not -l $file1 and -f _ and not -l $file2 and -f _) {
+      print "comparing \"$file1\" with \"$file2\"...\n" if $opt_v;
+      my $identical = 1;
+      my($handle1, $handle2);
+      if (open $handle1, "<$file1\0") {
+         binmode $handle1;
+         if (open $handle2, "<$file2\0") {
+            binmode $handle2;
+            my($bytes1, $bytes2, $buffer1, $buffer2) = (1);
+            while ($bytes1 > 0) {
+               $bytes1 = sysread $handle1, $buffer1, $block_size;
+               if (not defined $bytes1) {
+                  warn "$file1: $!\n";
+                  undef $identical;
+                  last;
+               }
+
+               $bytes2 = sysread $handle2, $buffer2, $block_size;
+               if (not defined $bytes2) {
+                  warn "$file2: $!\n";
+                  undef $identical;
+                  last;
+               }
+
+               undef $identical unless $buffer1 eq $buffer2;
+            }
+            undef $identical unless $bytes2 == 0;
+            close $handle2;
+         } else {
+            warn "$file2: $!\n";
+            undef $identical;
+         }
+         close $handle1;
+      } else {
+         warn "$file1: $!\n";
+         undef $identical;
+      }
+
+      return $identical;
+   }
+}
