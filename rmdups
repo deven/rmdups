@@ -12,7 +12,7 @@ sub md5 ($);
 sub identical ($$);
 
 # Program version.
-$VERSION = "0.1";
+$VERSION = "0.2";
 
 # Hardcoded parameters.
 $block_size = 8192;
@@ -79,7 +79,10 @@ sub scan (@) {
       } elsif (-d _) {
          scan dir_entries $file;
       } elsif ($size = size $file) {
-         push @{$sources{$size}}, $file;
+         unless (join "", map { identical $file, $_; } @{$sources{$size}}) {
+            push @{$sources{$size}}, $file;
+            ($dev{$file}, $ino{$file}) = stat $file;
+         }
       }
    }
 }
@@ -95,10 +98,12 @@ sub remove_duplicates (@) {
       } elsif (-d _) {
          remove_duplicates dir_entries $file;
       } elsif ($size = size $file) {
+         my($dev, $ino) = stat $file;
          my @sources = @{$sources{$size}};
          if (@sources) {
             my $md5 = md5 $file;
             foreach $source (@sources) {
+               next if $dev eq $dev{$source} and $ino eq $ino{$source};
                my $source_md5 = md5 $source;
                if ($md5 eq $source_md5) {
                   next unless identical $file, $source;
@@ -261,7 +266,10 @@ sub identical ($$) {
                   last;
                }
 
-               undef $identical unless $buffer1 eq $buffer2;
+               unless ($buffer1 eq $buffer2) {
+                  undef $identical;
+                  last;
+               }
             }
             undef $identical unless $bytes2 == 0;
             close $handle2;
