@@ -12,7 +12,7 @@ sub md5 ($);
 sub identical ($$);
 
 # Program version.
-$VERSION = "0.2";
+$VERSION = "0.3";
 
 # Hardcoded parameters.
 $block_size = 8192;
@@ -79,7 +79,7 @@ sub scan (@) {
       } elsif (-d _) {
          scan dir_entries $file;
       } elsif ($size = size $file) {
-         unless (join "", map { identical $file, $_; } @{$sources{$size}}) {
+         unless (join "", map { md5 $file eq md5 $_ and identical $file, $_; } @{$sources{$size}}) {
             push @{$sources{$size}}, $file;
             ($dev{$file}, $ino{$file}) = stat $file;
          }
@@ -163,12 +163,14 @@ sub remove_empties (@) {
                unlink $empty or warn "$empty: $!\n";
             }
 
-            if ($opt_v) {
+            if ($opt_n and $opt_v) {
+               print "would remove empty directory \"$file\"...\n";
+            } elsif ($opt_v) {
                print "removing empty directory \"$file\"...\n";
             } else {
                print "$file\n";
             }
-            rmdir $file or warn "$file: $!\n";
+            rmdir $file or warn "$file: $!\n" unless $opt_n;
          }
       } elsif (-z _) {
          push @{$sources{$size}}, $file;
