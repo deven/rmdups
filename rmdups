@@ -1,5 +1,9 @@
 #!/usr/bin/perl
 
+# Enable warnings.
+use strict;
+use warnings;
+
 # Initialize Perl modules.
 use File::Spec;
 use Getopt::Std;
@@ -17,15 +21,15 @@ sub md5 ($);
 sub identical ($$);
 
 # Program version.
-$VERSION = "0.4";
+our $VERSION = "0.5";
 
 # Hardcoded parameters.
-$block_size = 32768;
+our $block_size = 32768;
 
 # Setup usage and version messages.
-($program = $0) =~ s/^.*\///;
-$usage = "Usage: $program [-c] [-l] [-n] [-s] [-v] [-x] source ... -- target ...\n";
-$version = "$program version $VERSION\n";
+(our $program = $0) =~ s/^.*\///;
+our $usage = "Usage: $program [-c] [-l] [-n] [-s] [-v] [-x] source ... -- target ...\n";
+our $version = "$program version $VERSION\n";
 
 # Don't buffer output.
 $| = 1;
@@ -61,14 +65,17 @@ EOF
 }
 
 # Parse the command-line switches.
-our($opt_l, $opt_n, $opt_s, $opt_v, $opt_x);
+our ($opt_l, $opt_n, $opt_s, $opt_v, $opt_x);
 getopts("lnsvx");
 
 # Remove trailing slashes from filenames.
-map {s/\/+$//;} @ARGV;
+s/\/+$// foreach @ARGV;
+
+# Source files.
+my @sources;
 
 # Determine the source files.
-while ($source = shift @ARGV) {
+while (my $source = shift @ARGV) {
    last if $source eq "--";
    push @sources, $source;
 }
@@ -82,125 +89,131 @@ scan @sources;
 # Remove duplicates among remaining files.
 remove_duplicates @ARGV;
 
-# Recursive subroutine to scan and remember source files.
-sub scan (@) {
-   my @files = @_;
+# Scoping for lexical variable.
+BEGIN {
+   # Previously-scanned source files.
+   my %sources;
 
-   # Loop across the source files.
-   FILE: foreach my $file (@files) {
-      # Check the type of the file.
-      if (-l $file) {
-         # Verify that the link is readable.
-         readlink $file or warn "$file: $!\n";
-      } elsif (-d _) {
-         # Recursively scan subdirectories.
-         scan dir_entries "source", $file;
-      } elsif ($size = size $file) {
-         # Skip duplicates of previously-scanned source files.
-         foreach $source (@{$sources{$size}}) {
-            next FILE if identical $file, $source;
+   # Recursive subroutine to scan and remember source files.
+   sub scan (@) {
+      my (@files) = @_;
+
+      # Loop across the source files.
+      FILE: foreach my $file (@files) {
+         # Check the type of the file.
+         if (-l $file) {
+            # Verify that the link is readable.
+            readlink $file or warn "$file: $!\n";
+         } elsif (-d _) {
+            # Recursively scan subdirectories.
+            scan dir_entries "source", $file;
+         } elsif (my $size = size $file) {
+            # Skip duplicates of previously-scanned source files.
+            foreach my $source (@{$sources{$size}}) {
+               next FILE if identical $file, $source;
+            }
+
+            # Remember key information about source files.
+            push @{$sources{$size}}, $file;
          }
-
-         # Remember key information about source files.
-         push @{$sources{$size}}, $file;
       }
    }
-}
 
-# Recursive subroutine to remove duplicates of source files.
-sub remove_duplicates (@) {
-   my @files = @_;
+   # Recursive subroutine to remove duplicates of source files.
+   sub remove_duplicates (@) {
+      my (@files) = @_;
 
-   # Loop across the target files.
-   FILE: foreach my $file (@files) {
-      # Check the type of the file.
-      if (-l $file) {
-         # Verify that the link is readable.
-         readlink $file or warn "$file: $!\n";
-         # Should symlinks be removed if the relative path or basename matches?
-      } elsif (-d _) {
-         # Recursively scan subdirectories.
-         remove_duplicates dir_entries "target", $file;
-      } elsif ($size = size $file) {
-         # Skip duplicates of previously-scanned source files.
-         foreach $source (@{$sources{$size}}) {
-            # Check if this file is a duplicate of the source file.
-            next unless identical($file, $source) eq DUPLICATE;
+      # Loop across the target files.
+      FILE: foreach my $file (@files) {
+         # Check the type of the file.
+         if (-l $file) {
+            # Verify that the link is readable.
+            readlink $file or warn "$file: $!\n";
+            # Should symlinks be removed if the relative path or basename matches?
+         } elsif (-d _) {
+            # Recursively scan subdirectories.
+            remove_duplicates dir_entries "target", $file;
+         } elsif (my $size = size $file) {
+            # Skip duplicates of previously-scanned source files.
+            foreach my $source (@{$sources{$size}}) {
+               # Check if this file is a duplicate of the source file.
+               next unless identical($file, $source) eq "DUPLICATE";
 
-            # Check for verbose mode.
-            if ($opt_v) {
-               # Check for dry-run mode.
-               if ($opt_n) {
-                  # Check for linking options.
-                  if ($opt_s) {
-                     print "Would symlink \"$file\" as duplicate of \"$source\"...\n";
-                  } elsif ($opt_l) {
-                     print "Would link \"$file\" as duplicate of \"$source\"...\n";
+               # Check for verbose mode.
+               if ($opt_v) {
+                  # Check for dry-run mode.
+                  if ($opt_n) {
+                     # Check for linking options.
+                     if ($opt_s) {
+                        print "Would symlink \"$file\" as duplicate of \"$source\"...\n";
+                     } elsif ($opt_l) {
+                        print "Would link \"$file\" as duplicate of \"$source\"...\n";
+                     } else {
+                        print "Would remove \"$file\" as duplicate of \"$source\"...\n";
+                     }
                   } else {
-                     print "Would remove \"$file\" as duplicate of \"$source\"...\n";
+                     # Print informational message.
+                     print "Removing \"$file\" as duplicate of \"$source\"...\n";
                   }
                } else {
-                  # Print informational message.
-                  print "Removing \"$file\" as duplicate of \"$source\"...\n";
+                  # Not in verbose mode; print only the duplicate filename.
+                  print "$file\n";
                }
-            } else {
-               # Not in verbose mode; print only the duplicate filename.
-               print "$file\n";
+
+               # Skip to the next target file if in dry-run mode.
+               next FILE if $opt_n;
+
+               # Remove the duplicate file.
+               unlink $file or warn "$file: $!\n";
+
+               # Check if a hard link is wanted.
+               if ($opt_l and not $opt_s) {
+                  # Print information message if in verbose mode.
+                  print "Hard linking \"$file\" to \"$source\"...\n" if $opt_v;
+
+                  # Skip to the next target file if a link is successfully created.
+                  next FILE if link $source, $file;
+
+                  # Print information message if in verbose mode.
+                  print "Hard link failed; attempting symbolic link...\n" if $opt_v;
+               }
+
+               # Check if a symlink is wanted.
+               if ($opt_l or $opt_s) {
+                  # Determine the absolute pathnames of source and target files.
+                  my $abs_source = File::Spec->rel2abs($source);
+                  my $abs_file = File::Spec->rel2abs($file);
+
+                  # Determine the base directory of the target file.
+                  my $base_dir = File::Spec->catpath((File::Spec->splitpath($abs_file))[0,1]);
+
+                  # Determine the path to the source file, relative to the target file.
+                  my $symlink = File::Spec->abs2rel($source, $base_dir);
+
+                  # Print information message if in verbose mode.
+                  print "Symbolic linking \"$file\" to \"$symlink\"...\n" if $opt_v;
+
+                  # Create a symbolic link to the source file.
+                  symlink $symlink, $file or die "$file->$symlink: $!\n";
+
+                  # Make sure the target now exists via the symbolic link.
+                  die "$file: $!\n" unless -e $file;
+               }
+
+               # Skip to the next target file.
+               next FILE;
             }
-
-            # Skip to the next target file if in dry-run mode.
-            next FILE if $opt_n;
-
-            # Remove the duplicate file.
-            unlink $file or warn "$file: $!\n";
-
-            # Check if a hard link is wanted.
-            if ($opt_l and not $opt_s) {
-               # Print information message if in verbose mode.
-               print "Hard linking \"$file\" to \"$source\"...\n" if $opt_v;
-
-               # Skip to the next target file if a link is successfully created.
-               next FILE if link $source, $file;
-
-               # Print information message if in verbose mode.
-               print "Hard link failed; attempting symbolic link...\n" if $opt_v;
-            }
-
-            # Check if a symlink is wanted.
-            if ($opt_l or $opt_s) {
-               # Determine the absolute pathnames of source and target files.
-               my $abs_source = File::Spec->rel2abs($source);
-               my $abs_file = File::Spec->rel2abs($file);
-
-               # Determine the base directory of the target file.
-               my $base_dir = File::Spec->catpath((File::Spec->splitpath($abs_file))[0,1]);
-
-               # Determine the path to the source file, relative to the target file.
-               my $symlink = File::Spec->abs2rel($source, $base_dir);
-
-               # Print information message if in verbose mode.
-               print "Symbolic linking \"$file\" to \"$symlink\"...\n" if $opt_v;
-
-               # Create a symbolic link to the source file.
-               symlink $symlink, $file or die "$file->$symlink: $!\n";
-
-               # Make sure the target now exists via the symbolic link.
-               die "$file: $!\n" unless -e $file;
-            }
-
-            # Skip to the next target file.
-            next FILE;
          }
+      } continue {
+         # Remove empty files and directories unless linking duplicates.
+         remove_empties $file unless $opt_l or $opt_s;
       }
-   } continue {
-      # Remove empty files and directories unless linking duplicates.
-      remove_empties $file unless $opt_l or $opt_s;
    }
 }
 
 # Remove empty files and directories.
 sub remove_empties (@) {
-   my @files = @_;
+   my (@files) = @_;
 
    # Loop across the target files.
    foreach my $file (@files) {
@@ -284,8 +297,8 @@ sub remove_empties (@) {
 
 # Subroutine to get the entries of a directory, sorted with subdirectories last.
 sub dir_entries ($$) {
-   my($type, $dir) = @_;
-   my($handle, $entry, @subdir, @entries);
+   my ($type, $dir) = @_;
+   my ($handle, $entry, @subdir, @entries);
 
    # Open the directory.
    unless (opendir $handle, $dir) {
@@ -328,98 +341,122 @@ sub dir_entries ($$) {
    return @entries, @subdir;
 }
 
-# Get the device of the specified file.
-sub device ($) {
-   my $file = shift;
+# Scoping for lexical variable.
+BEGIN {
+   # Device cache.
+   my %device;
 
-   # Return cached value if available.
-   return $device{$file} if $device{$file};
+   # Get the device of the specified file.
+   sub device ($) {
+      my ($file) = @_;
 
-   # Cache and return the device of the file.
-   return ($device{$file} = (lstat $file)[0]);
-}
+      # Return cached value if available.
+      return $device{$file} if exists $device{$file};
 
-# Get the inode of the specified file.
-sub inode ($) {
-   my $file = shift;
-
-   # Return cached value if available.
-   return $inode{$file} if $inode{$file};
-
-   # Cache and return the inode of the file.
-   return ($inode{$file} = (lstat $file)[1]);
-}
-
-# Get the size of the specified file.
-sub size ($) {
-   my $file = shift;
-
-   # Return cached value if available.
-   return $size{$file} if exists $size{$file};
-
-   # Get the size of the file.
-   $size{$file} = (lstat $file)[7];
-
-   # Keep the size of regular files only.
-   delete $size{$file} unless -f _;
-
-   # Return the size of the file.
-   return $size{$file};
-}
-
-# Get the MD5 checksum of the first block of the specified file.
-sub md5 ($) {
-   my $file = shift;
-
-   # Return cached value if available.
-   return $md5{$file} if $md5{$file};
-
-   # Only checksum regular files.
-   return undef unless lstat $file and -f _;
-
-   # Variable for filehandle.
-   my $handle;
-
-   # Attempt to open the file.
-   unless (open $handle, "<$file\0") {
-      # Could not open the file; print a warning.
-      warn "$file: $!\n";
-
-      # Could not checksum the file.
-      return undef;
+      # Cache and return the device of the file.
+      return ($device{$file} = (lstat $file)[0]);
    }
+}
 
-   # Read the file in binary mode.
-   binmode $handle;
+# Scoping for lexical variable.
+BEGIN {
+   # Inode cache.
+   my %inode;
 
-   # Variable for the data buffer.
-   my $data;
+   # Get the inode of the specified file.
+   sub inode ($) {
+      my ($file) = @_;
 
-   # Read only the first block from the file.
-   unless (defined sysread $handle, $data, $block_size) {
-      # Could not read from the file; print a warning.
-      warn "$file: $!\n";
+      # Return cached value if available.
+      return $inode{$file} if exists $inode{$file};
 
-      # Could not checksum the file.
-      return undef;
+      # Cache and return the inode of the file.
+      return ($inode{$file} = (lstat $file)[1]);
    }
+}
 
-   # Close the file.
-   close $handle;
+# Scoping for lexical variable.
+BEGIN {
+   # File size cache.
+   my %size;
 
-   # Cache and return the checksum of the first block of the file.
-   return($md5{$file} = Digest::MD5::md5($data));
+   # Get the size of the specified file.
+   sub size ($) {
+      my ($file) = @_;
+
+      # Return cached value if available.
+      return $size{$file} if exists $size{$file};
+
+      # Get the size of the file.
+      $size{$file} = (lstat $file)[7];
+
+      # Keep the size of regular files only.
+      delete $size{$file} unless -f _;
+
+      # Return the size of the file.
+      return $size{$file};
+   }
+}
+
+# Scoping for lexical variable.
+BEGIN {
+   # MD5 checksum cache.
+   my %md5;
+
+   # Get the MD5 checksum of the first block of the specified file.
+   sub md5 ($) {
+      my ($file) = @_;
+
+      # Return cached value if available.
+      return $md5{$file} if $md5{$file};
+
+      # Only checksum regular files.
+      return undef unless lstat $file and -f _;
+
+      # Variable for filehandle.
+      my $handle;
+
+      # Attempt to open the file.
+      unless (open $handle, "<$file\0") {
+         # Could not open the file; print a warning.
+         warn "$file: $!\n";
+
+         # Could not checksum the file.
+         return undef;
+      }
+
+      # Read the file in binary mode.
+      binmode $handle;
+
+      # Variable for the data buffer.
+      my $data;
+
+      # Read only the first block from the file.
+      unless (defined sysread $handle, $data, $block_size) {
+         # Could not read from the file; print a warning.
+         warn "$file: $!\n";
+
+         # Could not checksum the file.
+         return undef;
+      }
+
+      # Close the file.
+      close $handle;
+
+      # Cache and return the checksum of the first block of the file.
+      return($md5{$file} = Digest::MD5::md5($data));
+   }
 }
 
 # Verify whether two files are byte-for-byte identical.
 sub identical ($$) {
-   my($file1, $file2) = @_;
+   my ($file1, $file2) = @_;
 
    # Print information messsage if in verbose mode.
    print "Comparing \"$file1\" with \"$file2\": " if $opt_v;
       
    # Variables for the filehandles.
-   my($handle1, $handle2);
+   my ($handle1, $handle2);
 
    # Catch errors.
    eval {
@@ -451,7 +488,7 @@ sub identical ($$) {
       binmode $handle2 or die "$file2: $!\n";
 
       # Variables for the comparison loop.
-      my($bytes1, $bytes2, $data1, $data2) = (1);
+      my ($bytes1, $bytes2, $data1, $data2) = (1);
 
       # Compare the file data, byte-for-byte.
       while ($bytes1 > 0) {
@@ -479,7 +516,7 @@ sub identical ($$) {
       print "Files are the same exact file.\n" if $opt_v;
 
       # Return keyword indicating that these are the same file.
-      return SAME;
+      return "SAME";
    }
 
    # Propagate real filesystem errors.
@@ -504,5 +541,5 @@ sub identical ($$) {
    print "Files are identical.\n" if $opt_v;
 
    # These are duplicate files.
-   return DUPLICATE;
+   return "DUPLICATE";
 }
